@@ -7,26 +7,54 @@ import numpy as np
 from std_msgs.msg import Bool
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import PoseWithCovarianceStamped
 
 class ToiletCleaning:
     def __init__(self):
         self.odom_sub = rospy.Subscriber('/odom',Odometry,self.getOdomCB)
+        self.scan_sub = rospy.Subscriber('/scan',LaserScan,self.getLaserDistCB)
+        self.amcl_sub = rospy.Subscriber('/amcl',PoseWithCOvarianceStamped,getPoseCB)
         self.cmd_vel_pub = rospy.Publisher('/cmd_vel',Twist,queue_size=1)
-        self.brush_pub = rospy.Publisher('/brush',Bool,queue_size=1)
 
-        self.state = 'CLEAN_FLOOR'
+        self.state = 'CHECK_SENSOR'
+        self.laser_dists = np.zeros(10)
+        self.robot_pose = np.zeros(3) # x y theta
         self.base_pose = Twist()
-        self.before_angle = 0.0
+        self.inversion = 1.0 
+        self.reward_grid = np.zeros(15,17)
+        self.is_safety = True
 
+    # -- Callback Functions -->
     def getOdomCB(self,msg):
         self.base_pose.linear.x = msg.pose.pose.position.x
         self.base_pose.linear.y = msg.pose.pose.position.y
         euler = tf.transformations.euler_from_quaternion((0,0, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w))
-        self.base_pose.angular.z = euler[2]
-        #print self.base_pose.angular.z - self.before_angle
-        print self.base_pose.angular.z
-        self.before_angle = self.base_pose.angular.z
+        self.base_pose.angular.z = euler[2] * self.inversion
 
+    def getLaserDistCB(self,msg):
+        for i in range(10):
+            self.laser_dists[i] = msg.ranges[i*80]
+
+        # check safety
+        for i in range(2):
+            if self.laser_dist[i*720] < 0.18:
+                self.stopBase()
+                self.safety = False
+                return 
+        for i in range(8):
+            if self.laser_dist[80+i*80] < 0.05:
+                self.stopBase()
+                self.safety = False
+                return
+
+    def getPoseCB(self,msg):
+        self.robot_pose[0] = msg.pose.pose.position.x
+        self.robot_pose[1] = msg.pose.pose.position.y
+        euler = tf.transformations.euler_from_quaternion((0,0, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w))
+        self.robot_pose[2] = euler[2]
+
+    # -- Control Base Functions -->
     def stopBase(self):
         vel = Twist()
         vel.linear.x = 0
@@ -45,11 +73,11 @@ class ToiletCleaning:
             moved_dist = np.sqrt(pow(init_x - self.base_pose.linear.x,2)
                                 +pow(init_y - self.base_pose.linear.y,2))
             print moved_dist
+            vel.angular.z = 0.01 # to correct
             vel.linear.x = 0.1
             self.cmd_vel_pub.publish(vel)
             rospy.sleep(0.1)
         self.stopBase()
-        rospy.sleep(1)
         print "finish advancing"
 
     def rotateBase(self,goal_angle):
@@ -60,7 +88,7 @@ class ToiletCleaning:
         moved_angle = 0.0
         vel = Twist()
         if goal_angle > 0:# Counter Clock Wise
-            while moved_angle < goal_angle and not rospy.is_shutdown():
+            while moved_angle < goal_angle-0.04 and not rospy.is_shutdown():
                 moved_angle = self.base_pose.angular.z - init_angle
                 if moved_angle <= -np.pi+0.05:
                     print "over horizone"
@@ -71,7 +99,7 @@ class ToiletCleaning:
                 print goal_angle,moved_angle 
 
         elif goal_angle < 0:# Clock Wise
-            while moved_angle > goal_angle and not rospy.is_shutdown():
+            while moved_angle > goal_angle+0.04 and not rospy.is_shutdown():
                 moved_angle = self.base_pose.angular.z - init_angle
                 if moved_angle >= np.pi-0.05:
                     print "over horizone"
@@ -81,22 +109,33 @@ class ToiletCleaning:
                 rospy.sleep(0.01)
                 print goal_angle,moved_angle 
         self.stopBase()
-        rospy.sleep(1)
         print "finish roteting"
 
-    def cleanFloor(self):
-        i=10
-        self.rotateBase(0.5*np.pi)
-        exit()
+    # -- Public Functions -->
+    def initEnv(self):
+        self.reward_grid = np.zeros(15,17)
+        self.reward_grid[int(self.robot_pose[0]),int(self.robot_pose[1])] = 1
+        self.is_safety = True
 
-    def loopMain(self):
-        while not rospy.is_shutdown():
-            if self.state=="CLEAN_FLOOR":
-                self.cleanFloor()
-            rospy.sleep(0.3)
+    def doAction(self,action):
+        #if is_safety == False:
+        #    exit()
 
-if __name__ == '__main__':
-    rospy.init_node('toilet_cleaning')
-    toilet_cleaning = ToiletCleaning()
-    rospy.sleep(1) # wait setup roomba
-    toilet_cleaning.loopMain()
+        if action == 0:
+            self.advanceBase(0.1)
+        elif action == 1:
+            self.rotateBase(np.pi/9) # 20 degree
+        elif action == 2:
+            self.rotateBase(np.pi/9*-1)
+
+        rospy.sleep(1.0)
+        return self.is_safety
+
+    def checkReward():
+        if self.reward_grid[int(self.robot_pose[0]),int(self.robot_pose[1])] == 0:
+            self.reward_grid[int(self.robot_pose[0]),int(self.robot_pose[1])] == 1
+            return 1
+        else:
+            return 0
+
+
